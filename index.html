@@ -256,7 +256,9 @@ input::placeholder{color:var(--sub2)}
   border-radius:var(--r-card);padding:16px;margin-bottom:10px;background:var(--card);
   box-shadow:0 0 0 var(--hair) var(--line);
 }
-.item .rich{margin:0 0 12px;font-size:15px;word-wrap:break-word;max-height:320px;overflow:auto}
+.item .rich{margin:0 0 12px;font-size:15px;overflow-wrap:anywhere;max-height:320px;overflow:auto}
+.item .rich a{text-decoration:underline;text-underline-offset:.18em}
+.item .rich.linkonly{font-size:14px;color:var(--sub);max-height:none}
 .item img{max-width:100%;border-radius:var(--r-sm);display:block;margin-bottom:12px;box-shadow:0 0 0 var(--hair) var(--line)}
 .filerow{display:flex;align-items:center;gap:10px;margin-bottom:12px}
 .filerow .fname{font-weight:500;overflow-wrap:anywhere}
@@ -351,8 +353,11 @@ footer a:hover{color:var(--ink)}
     <div class="card">
       <h2>Текст</h2>
       <div id="textBlocks"></div>
-      <button class="btn ghost" type="button" onclick="addTextBlock('')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" width="14" height="14" aria-hidden="true"><path d="M12 5.5v13M5.5 12h13"/></svg>Ещё блок текста</button>
-      <div class="meta" style="margin-top:10px">Enter - новый абзац с пустой строкой, Shift+Enter - перенос без отступа. Как выглядит здесь, так и вставится.</div>
+      <div class="row">
+        <button class="btn ghost" type="button" onclick="addTextBlock('')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" width="14" height="14" aria-hidden="true"><path d="M12 5.5v13M5.5 12h13"/></svg>Ещё блок текста</button>
+        <button class="btn ghost" type="button" id="pasteBtn" onmousedown="event.preventDefault()" onclick="pasteFromClipboard()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" width="14" height="14" aria-hidden="true"><rect x="8" y="3" width="8" height="4" rx="1.2"/><path d="M16 5h2.2A1.8 1.8 0 0 1 20 6.8v12.4A1.8 1.8 0 0 1 18.2 21H5.8A1.8 1.8 0 0 1 4 19.2V6.8A1.8 1.8 0 0 1 5.8 5H8"/></svg>Вставить</button>
+      </div>
+      <div class="meta" style="margin-top:10px">Enter - новый абзац с пустой строкой, Shift+Enter - перенос без отступа. Как выглядит здесь, так и вставится. «Вставить» берёт из буфера что угодно - текст, ссылку, картинку или файл.</div>
     </div>
 
     <div class="card">
@@ -572,6 +577,7 @@ function initTheme(){
 
 /* ---------- иконки ---------- */
 var ICON_X = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg>';
+var ICON_EXT = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" width="15" height="15" aria-hidden="true"><path d="M14 4.5h5.5V10M19.5 4.5 11 13"/><path d="M18 14.5v4A1.5 1.5 0 0 1 16.5 20h-11A1.5 1.5 0 0 1 4 18.5v-11A1.5 1.5 0 0 1 5.5 6h4"/></svg>';
 
 const DB_URL = "https://garna-share-default-rtdb.europe-west1.firebasedatabase.app";
 
@@ -646,6 +652,10 @@ function addTextBlock(html){
   bar.appendChild(kill);
 
   ed.addEventListener("input", updateMeta);
+  ed.addEventListener("focus", () => { lastEditor = ed; });
+  /* Как только в блок влезли руками, курсор снова принадлежит человеку:
+     следующая «Вставить» пойдёт в это место, а не в новый блок. */
+  ["pointerdown", "keydown"].forEach(ev => ed.addEventListener(ev, () => { autoFocused = null; }));
   ed.addEventListener("paste", e => {
     const cd = e.clipboardData;
     if(!cd) return;
@@ -822,6 +832,75 @@ function flatten(html, styled){
   return out.replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
 }
 
+/* ---------- ссылки ----------
+   Скобки внутри URL разрешены намеренно: ссылки Sales Navigator состоят из них
+   целиком. Лишнюю закрывающую скобку и знак препинания на хвосте снимает trimUrl. */
+function urlRe(){ return /https?:\/\/[^\s<>"'\u00ab\u00bb]+/gi; }
+
+function trimUrl(raw){
+  let u = String(raw);
+  for(;;){
+    const before = u;
+    u = u.replace(/[.,;:!?\u00bb"'\u2019\u201d]+$/, "");
+    while(u.endsWith(")") && (u.split(")").length - 1) > (u.split("(").length - 1)) u = u.slice(0, -1);
+    if(u === before) break;
+  }
+  return u;
+}
+
+/* Пускаем только http(s): javascript: и data: до кнопки не доходят. */
+function safeUrl(raw){
+  try{
+    const p = new URL(String(raw).trim());
+    return (p.protocol === "http:" || p.protocol === "https:") ? p.href : null;
+  }catch(e){ return null; }
+}
+
+/* Ссылка, если весь блок - это она: либо голый URL, либо один <a> и больше ничего. */
+function soleLink(html, plain){
+  const t = plain.trim();
+  if(t && !/\s/.test(t)){
+    const u = safeUrl(trimUrl(t));
+    if(u) return u;
+  }
+  const box = document.createElement("div");
+  box.innerHTML = html;
+  const links = box.querySelectorAll("a[href]");
+  if(links.length !== 1) return null;
+  if(t !== (links[0].textContent || "").trim()) return null;
+  return safeUrl(links[0].getAttribute("href"));
+}
+
+/* Голые URL в тексте делаем кликабельными. Внутрь готовых <a> не лезем. */
+function linkify(root){
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null);
+  const targets = [];
+  let n;
+  while((n = walker.nextNode())){
+    if(n.parentElement && n.parentElement.closest("a")) continue;
+    if(urlRe().test(n.nodeValue)) targets.push(n);
+  }
+  for(const node of targets){
+    const src = node.nodeValue, frag = document.createDocumentFragment();
+    const re = urlRe();
+    let last = 0, m;
+    while((m = re.exec(src))){
+      const raw = trimUrl(m[0]);
+      const href = safeUrl(raw);
+      re.lastIndex = m.index + raw.length;
+      if(!href) continue;
+      if(m.index > last) frag.appendChild(document.createTextNode(src.slice(last, m.index)));
+      const a = document.createElement("a");
+      a.href = href; a.target = "_blank"; a.rel = "noopener noreferrer";
+      a.textContent = raw;
+      frag.appendChild(a);
+      last = m.index + raw.length;
+    }
+    if(last < src.length) frag.appendChild(document.createTextNode(src.slice(last)));
+    node.parentNode.replaceChild(frag, node);
+  }
+}
+
 /* ---------- attachments ---------- */
 const drop = document.getElementById("drop");
 const picker = document.getElementById("picker");
@@ -837,6 +916,76 @@ document.addEventListener("paste", e => {
   const files = [...(e.clipboardData?.files || [])];
   if(files.length){ e.preventDefault(); addFiles(files); }
 });
+
+/* ---------- вставка из буфера ----------
+   Кнопка для устройств, где Ctrl+V недоступен: читает буфер сама и раскладывает
+   содержимое по месту - картинки и файлы во вложения, текст в блок. */
+let lastEditor = null;
+let autoFocused = null;   // блок, в котором курсор оказался не по воле человека, а после прошлой вставки
+
+function placeCaretEnd(el){
+  const r = document.createRange();
+  r.selectNodeContents(el); r.collapse(false);
+  const sel = window.getSelection();
+  sel.removeAllRanges(); sel.addRange(r);
+}
+
+function insertHtmlIntoEditor(frag){
+  /* Курсор человека уважаем - вставляем в него. Если человек в блок не заходил,
+     кладём в последний пустой блок, а когда тот занят - заводим новый: две ссылки
+     подряд не должны склеиться в одну строку. */
+  let ed = document.activeElement;
+  const mine = ed && ed.classList && ed.classList.contains("editor") && ed !== autoFocused;
+  if(!mine){
+    const all = [...document.querySelectorAll("#textBlocks .editor")];
+    ed = all[all.length - 1] || addTextBlock("");
+    if(ed.textContent.trim()) ed = addTextBlock("");
+    ed.focus(); placeCaretEnd(ed);
+  }
+  if(!window.getSelection().rangeCount) placeCaretEnd(ed);
+  if(!document.execCommand("insertHTML", false, frag)) ed.innerHTML += frag;
+  lastEditor = ed;
+  autoFocused = ed;
+  updateMeta();
+}
+
+function htmlFromPlain(text){
+  return escapeHTML(text).replace(/\r?\n/g, "<br>");
+}
+
+async function pasteFromClipboard(){
+  const btn = document.getElementById("pasteBtn");
+  try{
+    if(navigator.clipboard && navigator.clipboard.read){
+      const items = await navigator.clipboard.read();
+      const files = [];
+      let html = "", text = "";
+      for(const it of items){
+        const imgType = (it.types || []).find(t => t.indexOf("image/") === 0);
+        if(imgType){
+          const blob = await it.getType(imgType);
+          const ext = (imgType.split("/")[1] || "png").split("+")[0];
+          files.push(new File([blob], "clipboard-" + rid() + "." + ext, { type: imgType }));
+          continue;
+        }
+        if(!html && it.types.indexOf("text/html") >= 0) html = await (await it.getType("text/html")).text();
+        if(!text && it.types.indexOf("text/plain") >= 0) text = await (await it.getType("text/plain")).text();
+      }
+      if(files.length) await addFiles(files);
+      if(html || text) insertHtmlIntoEditor(html ? sanitizeHTML(html) : htmlFromPlain(text));
+      if(!files.length && !html && !text){ note("В буфере пусто"); return; }
+      flash(btn, "Вставлено");
+      return;
+    }
+    const t = await navigator.clipboard.readText();
+    if(!t.trim()){ note("В буфере пусто"); return; }
+    insertHtmlIntoEditor(htmlFromPlain(t));
+    flash(btn, "Вставлено");
+  }catch(err){
+    console.error(err);
+    note("Браузер не дал доступ к буферу. Вставь прямо в поле: Ctrl+V или долгое нажатие → «Вставить»");
+  }
+}
 
 async function addFiles(files){
   for(const f of files){
@@ -1088,10 +1237,25 @@ function renderItems(items, createdAt){
       const html = sanitizeHTML(it.html || escapeHTML(it.value || "").replace(/\r?\n/g, "<br>"));
       const plain = htmlToText(html);
       const hasFormat = /<(strong|em|u|s|ul|ol)[\s>]/i.test(html);
+      const link = soleLink(html, plain);
       const body = document.createElement("div");
-      body.className = "rich";
+      body.className = link ? "rich linkonly" : "rich";
       body.innerHTML = html;
+      linkify(body);
       const row = document.createElement("div"); row.className = "row";
+      if(link){
+        const b0 = document.createElement("a");
+        b0.className = "btn primary";
+        b0.href = link; b0.target = "_blank"; b0.rel = "noopener noreferrer";
+        b0.innerHTML = ICON_EXT + "Открыть в новой вкладке";
+        row.appendChild(b0);
+        if(plain.trim() !== link && plain.trim() !== link.replace(/\/$/, "")){
+          const bl = document.createElement("button");
+          bl.className = "btn"; bl.textContent = "Копировать ссылку";
+          bl.onclick = () => copyText(link, bl, "Ссылка скопирована");
+          row.appendChild(bl);
+        }
+      }
       if(hasFormat){
         const b0 = document.createElement("button");
         b0.className = "btn primary"; b0.textContent = "Копировать для LinkedIn";
@@ -1100,8 +1264,8 @@ function renderItems(items, createdAt){
         row.appendChild(b0);
       }
       const b2 = document.createElement("button");
-      b2.className = hasFormat ? "btn" : "btn primary";
-      b2.textContent = hasFormat ? "Обычный текст" : "Копировать";
+      b2.className = (hasFormat || link) ? "btn" : "btn primary";
+      b2.textContent = hasFormat ? "Обычный текст" : (row.children.length > 1 ? "Копировать текст" : "Копировать");
       b2.onclick = () => copyText(plain, b2, "Скопировано");
       row.appendChild(b2);
       card.appendChild(body); card.appendChild(row);
@@ -1166,10 +1330,10 @@ async function deletePkg(code){
 
 /* ---------- clipboard ---------- */
 function flash(btn, label){
-  const old = btn.textContent, wasPrimary = btn.classList.contains("primary");
+  const old = btn.innerHTML, wasPrimary = btn.classList.contains("primary");
   btn.textContent = label; btn.classList.add("done"); btn.classList.remove("primary");
   setTimeout(() => {
-    btn.textContent = old; btn.classList.remove("done");
+    btn.innerHTML = old; btn.classList.remove("done");
     if(wasPrimary) btn.classList.add("primary");
   }, 1400);
 }
